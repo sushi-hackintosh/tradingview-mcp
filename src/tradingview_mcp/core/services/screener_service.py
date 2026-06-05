@@ -806,7 +806,13 @@ def run_multi_timeframe_analysis(
     if not _TA_AVAILABLE:
         return {"error": "tradingview_ta is missing; run `uv sync`."}
 
-    screener = EXCHANGE_SCREENER.get(exchange, "crypto")
+    # Screener follows the RESOLVED symbol's venue (e.g. XAUUSD→TVC:GOLD→"cfd",
+    # EURUSD→FX_IDC→"forex"), not the caller's exchange guess. Without this,
+    # symbol aliasing redirected gold/FX to TVC: but the screener stayed on the
+    # caller's "crypto" default, so every timeframe returned "No data". This is
+    # the same fix analyze_coin already uses (see resolve_screener_for_symbol).
+    from tradingview_mcp.core.utils.validators import resolve_screener_for_symbol
+    screener = resolve_screener_for_symbol(symbol, exchange)
     timeframes = ["1W", "1D", "4h", "1h", "15m"]
     tf_labels = {
         "1W": "Weekly (Trend Bias)",
