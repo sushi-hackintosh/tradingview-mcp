@@ -730,6 +730,42 @@ def bitcoin_market_pulse() -> dict:
 
 
 @mcp.tool()
+def watchlist_get(symbols: list[str]) -> list[dict]:
+    """Get the last price and daily change for an explicit TradingView watchlist.
+
+    Use this when the user asks for his watchlist or wants to inspect a named
+    list of symbols. The caller must provide the symbol list; the server does
+    not persist any watchlist state.
+
+    Args:
+        symbols: Explicit symbol list, e.g. ["TSLA", "AAPL", "NVDA"]
+
+    Returns:
+        list[dict] with symbol, last price, change and change_pct when
+        available."""
+    results: list[dict] = []
+    for raw in symbols:
+        symbol = str(raw).strip()
+        if not symbol:
+            continue
+        try:
+            quote = get_price(normalize_yahoo_symbol(symbol))
+        except Exception as exc:
+            results.append({"symbol": symbol, "error": f"quote_failed: {exc}"})
+            continue
+        results.append({
+            "symbol": symbol.upper(),
+            "last": quote.get("price"),
+            "change": quote.get("change"),
+            "change_pct": quote.get("change_pct"),
+            "currency": quote.get("currency", "USD"),
+            "exchange": quote.get("exchange", ""),
+            "market_state": quote.get("market_state", ""),
+        })
+    return results
+
+
+@mcp.tool()
 def stock_extended_hours(symbol: str) -> dict:
     """Real-time pre-market and after-hours prices for a US stock symbol.
 
