@@ -2,6 +2,7 @@ import CDP from 'chrome-remote-interface';
 
 let client = null;
 let targetInfo = null;
+let activeTargetId = null;
 const CDP_HOST = 'localhost';
 const CDP_PORT = 9222;
 const MAX_RETRIES = 5;
@@ -76,6 +77,7 @@ export async function connect() {
       await client.Runtime.enable();
       await client.Page.enable();
       await client.DOM.enable();
+      try { await client.Target.enable(); } catch { /* Target domain may be unavailable */ }
 
       return client;
     } catch (err) {
@@ -90,6 +92,13 @@ export async function connect() {
 async function findChartTarget() {
   const resp = await fetch(`http://${CDP_HOST}:${CDP_PORT}/json/list`);
   const targets = await resp.json();
+  // If a specific target was selected via setActiveTarget, prefer it
+  if (activeTargetId) {
+    const t = targets.find(t => t.id === activeTargetId);
+    if (t) return t;
+    // Target gone (tab closed) — fall back to default selection
+    activeTargetId = null;
+  }
   // Prefer targets with tradingview.com/chart in the URL
   return targets.find(t => t.type === 'page' && /tradingview\.com\/chart/i.test(t.url))
     || targets.find(t => t.type === 'page' && /tradingview/i.test(t.url))
@@ -100,6 +109,20 @@ export async function getTargetInfo() {
   if (!targetInfo) {
     await getClient();
   }
+  return targetInfo;
+}
+
+/**
+ * Switch the active CDP target to a specific tab (by target id).
+ * This reconnects the underlying CDP client so that subsequent evaluate()
+ * calls run in the context of the selected tab's chart widget — fixing the
+ * multi-tab bug where _activeChartWidgetWV stayed sticky on the first tab.
+ */
+export async function setActiveTarget(id) {
+  activeTargetId = id;
+  client = null;
+  targetInfo = null;
+  await connect();
   return targetInfo;
 }
 
