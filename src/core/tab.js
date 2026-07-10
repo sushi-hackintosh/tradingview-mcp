@@ -2,7 +2,7 @@
  * Core tab management logic.
  * Controls TradingView Desktop tabs via CDP and Electron keyboard shortcuts.
  */
-import { getClient, evaluate } from '../connection.js';
+import { getClient, evaluate, setActiveTarget } from '../connection.js';
 
 const CDP_HOST = 'localhost';
 const CDP_PORT = 9222;
@@ -28,30 +28,35 @@ export async function list() {
 }
 
 /**
- * Open a new chart tab via keyboard shortcut (Ctrl+T / Cmd+T).
+ * Open a new chart tab. Uses CDP Target.createTarget (reliable on Electron/TV Desktop),
+ * falling back to the keyboard shortcut if needed.
  */
 export async function newTab() {
   const c = await getClient();
 
-  // Electron/TradingView Desktop uses Ctrl+T for new tab on macOS too
-  // But some versions use Cmd+T
-  const isMac = process.platform === 'darwin';
-  const mod = isMac ? 4 : 2; // 4 = meta (Cmd), 2 = ctrl
-
-  await c.Input.dispatchKeyEvent({
-    type: 'keyDown',
-    modifiers: mod,
-    key: 't',
-    code: 'KeyT',
-    windowsVirtualKeyCode: 84,
-  });
-  await c.Input.dispatchKeyEvent({ type: 'keyUp', key: 't', code: 'KeyT' });
-
-  await new Promise(r => setTimeout(r, 2000));
-
-  // Verify a new tab appeared
-  const state = await list();
-  return { success: true, action: 'new_tab_opened', ...state };
+  // Prefer CDP Target.createTarget — the keyboard shortcut is often swallowed by
+  // Electron's global shortcut handler and never reaches the page.
+  try {
+    await c.Target.createTarget({ url: 'https://www.tradingview.com/chart/' });
+    await new Promise(r => setTimeout(r, 2000));
+    const state = await list();
+    return { success: true, action: 'new_tab_opened_cdp', ...state };
+  } catch (e) {
+    // Fallback to keyboard shortcut
+    const isMac = process.platform === 'darwin';
+    const mod = isMac ? 4 : 2;
+    await c.Input.dispatchKeyEvent({
+      type: 'keyDown',
+      modifiers: mod,
+      key: 't',
+      code: 'KeyT',
+      windowsVirtualKeyCode: 84,
+    });
+    await c.Input.dispatchKeyEvent({ type: 'keyUp', key: 't', code: 'KeyT' });
+    await new Promise(r => setTimeout(r, 2000));
+    const state = await list();
+    return { success: true, action: 'new_tab_opened_kbd', ...state };
+  }
 }
 
 /**
@@ -99,8 +104,35 @@ export async function switchTab({ index }) {
   try {
     const resp = await fetch(`http://${CDP_HOST}:${CDP_PORT}/json/activate/${target.id}`);
     const text = await resp.text();
-    return { success: true, action: 'switched', index: idx, tab_id: target.id, chart_id: target.chart_id };
   } catch (e) {
     throw new Error(`Failed to activate tab ${idx}: ${e.message}`);
   }
+
+  // Reconnect the CDP client to this tab's target so that chart_* / study_*
+  // operations run in the correct tab context (fixes the sticky
+  // _activeChartWidgetWV bug).
+  try {
+    await setActiveTarget(target.id);
+  } catch (e) {
+    throw new Error(`Failed to bind CDP client to tab ${idx}: ${e.message}`);
+  }
+
+  return { success: true, action: 'switched', index: idx, tab_id: target.id, chart_id: target.chart_id };
+}
+
+/**
+ * Switch to a tab by its stable CDP target id (not by index, which can shift).
+ */
+export async function switchTabById({ id }) {
+  // Reconnect the CDP client to this tab's target
+  try {
+    await setActiveTarget(id);
+  } catch (e) {
+    throw new Error(`Failed to bind CDP client to tab ${id}: ${e.message}`);
+  }
+  // Also activate it in the UI
+  try {
+    await fetch(`http://${CDP_HOST}:${CDP_PORT}/json/activate/${id}`);
+  } catch (e) { /* non-fatal */ }
+  return { success: true, action: 'switched_by_id', tab_id: id };
 }

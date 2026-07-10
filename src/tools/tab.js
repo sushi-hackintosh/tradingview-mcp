@@ -24,4 +24,11 @@ export function registerTabTools(server) {
     try { return jsonResult(await core.switchTab({ index })); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
+
+  server.tool('tab_switch_by_id', 'Switch to a chart tab by its stable CDP target id', {
+    id: z.string().describe('Tab target id (from tab_list)'),
+  }, async ({ id }) => {
+    try { return jsonResult(await core.switchTabById({ id })); }
+    catch (err) { return jsonResult({ success: false, error: err.message }, true); }
+  });
 }
