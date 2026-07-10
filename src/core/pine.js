@@ -290,20 +290,21 @@ export async function compile() {
       var btns = document.querySelectorAll('button');
       var fallback = null;
       var saveBtn = null;
+      function label(b){ return ((b.textContent||'')+' '+(b.getAttribute('title')||'')+' '+(b.getAttribute('aria-label')||'')).trim().toLowerCase(); }
       for (var i = 0; i < btns.length; i++) {
-        var text = btns[i].textContent.trim();
-        if (/save and add to chart/i.test(text)) {
+        var l = label(btns[i]);
+        if (/save and add to chart|enregistrer et ajouter au graphique/.test(l)) {
           btns[i].click();
           return 'Save and add to chart';
         }
-        if (!fallback && /^(Add to chart|Update on chart)/i.test(text)) {
+        if (!fallback && /(add to chart|ajouter au graphique|mettre .* jour sur le graphique)/.test(l)) {
           fallback = btns[i];
         }
         if (!saveBtn && btns[i].className.indexOf('saveButton') !== -1 && btns[i].offsetParent !== null) {
           saveBtn = btns[i];
         }
       }
-      if (fallback) { fallback.click(); return fallback.textContent.trim(); }
+      if (fallback) { fallback.click(); return fallback.textContent.trim() || fallback.getAttribute('title'); }
       if (saveBtn) { saveBtn.click(); return 'Pine Save'; }
       return null;
     })()
@@ -348,32 +349,82 @@ export async function save() {
   const editorReady = await ensurePineEditorOpen();
   if (!editorReady) throw new Error('Could not open Pine Editor.');
 
-  const c = await getClient();
-  await c.Input.dispatchKeyEvent({ type: 'keyDown', modifiers: 2, key: 's', code: 'KeyS', windowsVirtualKeyCode: 83 });
-  await c.Input.dispatchKeyEvent({ type: 'keyUp', key: 's', code: 'KeyS' });
-  await new Promise(r => setTimeout(r, 800));
-
-  // Handle "Save Script" name dialog that appears for new/unsaved scripts
-  const dialogHandled = await evaluate(`
+  // Click the "Sauvegarder"/"Save" button in the Pine Editor toolbar directly
+  // (more reliable than a keyboard shortcut, which doesn't fire on macOS via CDP).
+  const clickEditorSave = `
     (function() {
-      var saveBtn = null;
       var btns = document.querySelectorAll('button');
       for (var i = 0; i < btns.length; i++) {
-        var text = btns[i].textContent.trim();
-        if (text === 'Save' && btns[i].offsetParent !== null) {
-          // Check if it's in a dialog (not the Pine Editor save button)
-          var parent = btns[i].closest('[class*="dialog"], [class*="modal"], [class*="popup"], [role="dialog"]');
-          if (parent) { saveBtn = btns[i]; break; }
+        var text = (btns[i].textContent||'').trim();
+        if ((text === 'Save' || text === 'Sauvegarder') && btns[i].offsetParent !== null) {
+          btns[i].click(); return true;
         }
       }
-      if (saveBtn) { saveBtn.click(); return true; }
       return false;
     })()
-  `);
+  `;
 
-  if (dialogHandled) await new Promise(r => setTimeout(r, 500));
+  // Initial attempt: click the editor Save button
+  try { await evaluate(clickEditorSave); } catch (e) {}
 
-  return { success: true, action: dialogHandled ? 'saved_with_dialog' : 'Ctrl+S_dispatched' };
+  // Poll for the "Save Script" name dialog (FR: "Sauvegarder") up to ~4s
+  const clickSave = `
+    (function() {
+      var btns = document.querySelectorAll('button');
+      for (var i = 0; i < btns.length; i++) {
+        var text = (btns[i].textContent||'').trim();
+        if ((text === 'Save' || text === 'Sauvegarder') && btns[i].offsetParent !== null) {
+          var parent = btns[i].closest('[class*="dialog"], [class*="modal"], [class*="popup"], [role="dialog"]');
+          if (parent) { btns[i].click(); return true; }
+        }
+      }
+      return false;
+    })()
+  `;
+
+  let handled = false;
+  for (let attempt = 0; attempt < 8; attempt++) {
+    const res = await evaluate(clickSave);
+    if (res === true || res === 'true') { handled = true; break; }
+    await new Promise(r => setTimeout(r, 500));
+  }
+
+  // If no dialog appeared, fall back to the keyboard shortcut
+  if (!handled) {
+    const c = await getClient();
+    const mod = process.platform === 'darwin' ? 4 : 2;
+    await c.Input.dispatchKeyEvent({ type: 'keyDown', modifiers: mod, key: 's', code: 'KeyS', windowsVirtualKeyCode: 83 });
+    await c.Input.dispatchKeyEvent({ type: 'keyUp', key: 's', code: 'KeyS' });
+    for (let attempt = 0; attempt < 8; attempt++) {
+      const res = await evaluate(clickSave);
+      if (res === true || res === 'true') { handled = true; break; }
+      await new Promise(r => setTimeout(r, 500));
+    }
+  }
+
+  if (handled) await new Promise(r => setTimeout(r, 800));
+
+  // If a name input is empty, fill it from the strategy() name in the editor
+  if (handled) {
+    await evaluate(`
+      (function() {
+        var inputs = document.querySelectorAll('input[type="text"], input:not([type])');
+        for (var i = 0; i < inputs.length; i++) {
+          var wrap = inputs[i].closest('[class*="dialog"],[class*="modal"],[role="dialog"]');
+          if (wrap && !inputs[i].value) {
+            var m = (window.__monacoEditorForPine && window.__monacoEditorForPine.getValue ? window.__monacoEditorForPine.getValue() : '');
+            var mm = m.match(/strategy\\("\\s*([^"\\s]+)/) || m.match(/indicator\\("\\s*([^"\\s]+)/);
+            if (mm) { inputs[i].value = mm[1]; var ev = new Event('input',{bubbles:true}); inputs[i].dispatchEvent(ev); }
+            break;
+          }
+        }
+      })()
+    `);
+    await evaluate(clickSave);
+    await new Promise(r => setTimeout(r, 800));
+  }
+
+  return { success: true, action: handled ? 'saved_with_dialog' : 'no_dialog' };
 }
 
 export async function getConsole() {
@@ -446,14 +497,15 @@ export async function smartCompile() {
       var addBtn = null;
       var updateBtn = null;
       var saveBtn = null;
+      function label(b){ return ((b.textContent||'')+' '+(b.getAttribute('title')||'')+' '+(b.getAttribute('aria-label')||'')).trim().toLowerCase(); }
       for (var i = 0; i < btns.length; i++) {
-        var text = btns[i].textContent.trim();
-        if (/save and add to chart/i.test(text)) {
+        var l = label(btns[i]);
+        if (/save and add to chart|enregistrer et ajouter au graphique/.test(l)) {
           btns[i].click();
           return 'Save and add to chart';
         }
-        if (!addBtn && /^add to chart$/i.test(text)) addBtn = btns[i];
-        if (!updateBtn && /^update on chart$/i.test(text)) updateBtn = btns[i];
+        if (!addBtn && /(add to chart|ajouter au graphique)/.test(l)) addBtn = btns[i];
+        if (!updateBtn && /(update on chart|mettre .* jour sur le graphique)/.test(l)) updateBtn = btns[i];
         if (!saveBtn && btns[i].className.indexOf('saveButton') !== -1 && btns[i].offsetParent !== null) saveBtn = btns[i];
       }
       if (addBtn) { addBtn.click(); return 'Add to chart'; }
